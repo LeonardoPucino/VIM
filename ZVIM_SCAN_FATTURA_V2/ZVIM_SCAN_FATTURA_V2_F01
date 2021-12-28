@@ -1,0 +1,472 @@
+*&---------------------------------------------------------------------*
+*&  Include           ZVIM_SCAN_FATTURA_V2_F01
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  MAIN
+*&---------------------------------------------------------------------*
+FORM main .
+
+  PERFORM archivobject_create .
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  ARCHIVOBJECT_CREATE
+*&---------------------------------------------------------------------*
+FORM archivobject_create .
+
+  TYPES: BEGIN OF ty_range,
+           sign(1)   TYPE c,
+           option(2) TYPE c,
+           low       TYPE  swfrtwiid,
+           high      TYPE swfrtwiid,
+         END OF ty_range.
+
+  DATA: BEGIN OF lt_data OCCURS 1,
+          line(1024) TYPE x,
+        END OF lt_data.
+
+  DATA: lv_document_class TYPE saedoktyp VALUE 'XML',
+        lv_mimetype       TYPE bdn_con-mimetype,
+        lv_archiv_id      TYPE saearchivi VALUE 'Y2',
+        lv_doc_type       TYPE saedoktyp VALUE 'XML',
+        lv_frontend       TYPE c,
+        lv_arc_docid      TYPE saeardoid,
+        lv_len            TYPE i,
+        lt_file_tbl       TYPE TABLE OF zsalfldir,
+        lv_string         TYPE string,
+        lt_infiletab      TYPE filetable,
+        ls_infiletab      TYPE file_table,
+        lv_size           TYPE i,
+        lv_length         TYPE num12,
+        lv_status         TYPE p,
+        lv_workitem_id    TYPE swwwihead-wi_id,
+        lv_objecttext     TYPE toasp-objecttext,
+        lr_top_wi_id      TYPE RANGE OF swfrtwiid,
+        ls_top            TYPE ty_range,
+        ls_archid_file    TYPE zvim_archid_file,
+        lt_archid_file    TYPE TABLE OF zvim_archid_file.
+
+  FIELD-SYMBOLS: <binary> TYPE x.
+
+  SELECT SINGLE *
+    FROM twfdb
+    CLIENT SPECIFIED
+    INTO @DATA(ls_twfdb)
+    WHERE mandt   = @sy-mandt
+      AND ncitype = @doctype.
+
+  PERFORM get_mimetype USING lv_document_class
+                             lv_mimetype.
+
+  SELECT SINGLE *
+    FROM zvim_scan_cust
+    INTO @DATA(ls_scan_cust)
+    WHERE key_param EQ 'PATH'.
+  IF sy-subrc NE 0.
+    WRITE: 'Parametro chiave PATH non trovato in ZVIM_SCAN_CUST.'.
+    STOP.
+  ENDIF.
+
+  SHIFT ls_scan_cust-value LEFT DELETING LEADING space.
+  lv_len = strlen( ls_scan_cust-value ).
+  lv_len = lv_len - 1 .
+  ls_scan_cust-value = ls_scan_cust-value(lv_len).
+
+  CALL FUNCTION 'ZRZL_READ_DIR'
+    EXPORTING
+      name           = ls_scan_cust-value
+    TABLES
+      file_tbl       = lt_file_tbl
+    EXCEPTIONS
+      argument_error = 1
+      not_found      = 2
+      send_error     = 3
+      system_failure = 4
+      OTHERS         = 5.
+  IF sy-subrc EQ 0.
+
+    DELETE lt_file_tbl WHERE size = 0.
+    DELETE lt_file_tbl WHERE name = '.'.
+    DELETE lt_file_tbl WHERE name = '..'.
+
+    LOOP AT lt_file_tbl ASSIGNING FIELD-SYMBOL(<fs_file>)
+      WHERE name NS '_MT_'.
+
+      CLEAR: lt_data, lt_data[], lv_size, lv_length, lv_len, lv_string, lv_arc_docid, lv_workitem_id.
+      REFRESH: lt_data, lt_data[].
+      UNASSIGN <binary>.
+
+      "Check se file è un XML
+      SPLIT <fs_file>-name AT '.' INTO TABLE DATA(lt_split_table).
+      DESCRIBE TABLE lt_split_table LINES DATA(lv_lines).
+      READ TABLE lt_split_table INDEX lv_lines INTO DATA(lv_temp_string).
+      DATA(lv_temp_length) = strlen( lv_temp_string ).
+      IF lv_temp_length GE 3.
+        IF lv_temp_string(3) EQ 'XML' OR lv_temp_string(3) EQ 'xml' OR lv_temp_string(3) EQ 'Xml'.
+        ELSE.
+          CONTINUE.
+        ENDIF.
+      ENDIF.
+
+      "Path al file completo
+      CONCATENATE ls_scan_cust-value '\' <fs_file>-name INTO lv_string.
+
+      OPEN DATASET lv_string FOR INPUT IN BINARY MODE.
+      IF sy-subrc = 0.
+
+        ASSIGN COMPONENT 1 OF STRUCTURE lt_data TO <binary> TYPE 'X'.
+        IF sy-subrc = 4.
+          ASSIGN COMPONENT 0 OF STRUCTURE lt_data TO <binary> TYPE 'X'.
+        ENDIF.
+
+        lv_size = 0.
+        DO.
+          CLEAR lt_data.
+          READ DATASET lv_string INTO <binary> LENGTH lv_len.
+          IF sy-subrc <> 0.
+            IF lv_len > 0.
+              ADD lv_len TO lv_size.
+              APPEND lt_data.
+            ENDIF.
+            EXIT.
+          ENDIF.
+          ADD lv_len TO lv_size.
+          APPEND lt_data.
+        ENDDO.
+
+        CLOSE DATASET lv_string.
+      ELSE.
+        CONCATENATE 'Impossibile aprire file:' <fs_file>-name INTO DATA(lv_write_string) SEPARATED BY space.
+        WRITE: lv_write_string.
+        STOP.
+      ENDIF.
+
+      lv_length = lv_size.
+
+      "Crea il puntamento al file da archiviare
+      CALL FUNCTION 'ARCHIVOBJECT_CREATE_TABLE'
+        EXPORTING
+          archiv_id                = lv_archiv_id
+          document_type            = lv_doc_type
+          length                   = lv_length
+*         compid                   = 'data'
+*         signature                = 'X'
+        IMPORTING
+          archiv_doc_id            = lv_arc_docid
+        TABLES
+          binarchivobject          = lt_data
+        EXCEPTIONS
+          error_archiv             = 1
+          error_communicationtable = 2
+          error_kernel             = 3
+          blocked_by_policy        = 4
+          OTHERS                   = 5.
+      IF sy-subrc = 0.
+
+        lv_objecttext = input.
+
+        "Inserisce il file in archive link
+        CALL FUNCTION 'ARCHIV_PROCESS_FAXINPUT'
+          EXPORTING
+            archiv_id           = lv_archiv_id
+            arc_doc_id          = lv_arc_docid
+            documentclass       = lv_doc_type
+            immediately         = 'X'
+            late                = ''
+            s_twfdb             = ls_twfdb
+            orgobject           = orgobj
+            objecttext          = lv_objecttext
+          IMPORTING
+            status              = lv_status
+            workitem_id         = lv_workitem_id
+          EXCEPTIONS
+            no_workitem_created = 1
+            OTHERS              = 2.
+        IF sy-subrc = 0.
+
+          CLEAR: ls_top, ls_archid_file.
+
+          ls_top-sign = 'I' .
+          ls_top-option = 'EQ'.
+          ls_top-low = lv_workitem_id.
+          APPEND ls_top TO lr_top_wi_id.
+
+          ls_archid_file-arc_doc_id       = lv_arc_docid.
+          ls_archid_file-wi_id            = lv_workitem_id.
+          ls_archid_file-file_name_origin = <fs_file>-name.
+          PERFORM filename_split USING ls_archid_file-file_name_origin CHANGING ls_archid_file-filename_split ls_archid_file-sys_id_arxivar.
+          ls_archid_file-create_date      = sy-datum.
+          APPEND ls_archid_file TO lt_archid_file.
+
+        ENDIF.
+      ENDIF.
+
+    ENDLOOP.
+
+    PERFORM move_files USING ls_scan_cust-value
+                             lt_file_tbl.
+
+  ELSE.
+    WRITE: 'Directory specificata in tabella ZVIM_SCAN_CUST non accessibile.'.
+    STOP.
+  ENDIF.
+
+  IF lt_archid_file IS INITIAL.
+    WRITE: 'Nessun file da elaborare trovato.'.
+    STOP.
+  ENDIF.
+
+  CHECK lt_archid_file IS NOT INITIAL.
+
+  COMMIT WORK AND WAIT.
+
+  WAIT UP TO 5 SECONDS.
+
+  SELECT *
+    FROM sww_wi2obj
+    INTO TABLE @DATA(lt_wi2obj)
+    WHERE top_wi_id IN @lr_top_wi_id
+      AND typeid    = '/OTX/PF01R'
+      AND instid    <> '000000000000'.
+  IF sy-subrc = 0.
+    LOOP AT lt_archid_file ASSIGNING FIELD-SYMBOL(<fs_archid>).
+      IF <fs_archid> IS ASSIGNED.
+        READ TABLE lt_wi2obj ASSIGNING FIELD-SYMBOL(<fs_wi2obj>)
+          WITH KEY top_wi_id = <fs_archid>-wi_id.
+        IF sy-subrc = 0.
+          <fs_archid>-reg_id = <fs_wi2obj>-instid.
+          INSERT zvim_archid_file FROM <fs_archid>.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+  IF submit IS NOT INITIAL.
+    PERFORM submit_otx_trigger USING lt_archid_file.
+  ELSE.
+    PERFORM write_results USING lt_archid_file.
+  ENDIF.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_MIMETYPE
+*&---------------------------------------------------------------------*
+FORM get_mimetype USING pv_document_class
+                        pv_mimetype.
+
+  TRANSLATE pv_document_class TO UPPER CASE.
+  SELECT SINGLE mimetype
+    FROM toadd
+    INTO pv_mimetype
+    WHERE doc_type = pv_document_class.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  MOVE_FILES
+*&---------------------------------------------------------------------*
+FORM move_files USING pv_path      TYPE zvalue_cust
+                      pt_file_tbl  TYPE zsalfldir_tt.
+
+  DATA: lv_xstring TYPE xstring.
+
+  SELECT SINGLE *
+    FROM zvim_scan_cust
+    INTO @DATA(ls_scan_cust)
+    WHERE key_param EQ 'PATH_MOVE'.
+  IF sy-subrc NE 0.
+    WRITE: 'Parametro chiave PATH_MOVE non trovato in ZVIM_SCAN_CUST.'.
+    STOP.
+  ENDIF.
+
+  LOOP AT pt_file_tbl ASSIGNING FIELD-SYMBOL(<fs_file>).
+    IF <fs_file> IS ASSIGNED.
+
+      "Check se file è un XML
+      SPLIT <fs_file>-name AT '.' INTO TABLE DATA(lt_split_table).
+      DESCRIBE TABLE lt_split_table LINES DATA(lv_lines).
+      READ TABLE lt_split_table INDEX lv_lines INTO DATA(lv_temp_string).
+      DATA(lv_temp_length) = strlen( lv_temp_string ).
+      IF lv_temp_length GE 3.
+        IF lv_temp_string(3) EQ 'XML' OR lv_temp_string(3) EQ 'xml' OR lv_temp_string(3) EQ 'Xml'.
+        ELSE.
+          CONTINUE.
+        ENDIF.
+      ENDIF.
+
+      CLEAR: lv_xstring.
+
+      CONCATENATE pv_path '\' <fs_file>-name INTO DATA(lv_fullpath).
+      CONCATENATE ls_scan_cust-value '\' <fs_file>-name INTO DATA(lv_fullpath_move).
+
+      OPEN DATASET lv_fullpath FOR INPUT IN BINARY MODE.
+      IF sy-subrc = 0.
+        READ DATASET lv_fullpath INTO lv_xstring.
+      ENDIF.
+      CLOSE DATASET lv_fullpath.
+
+      OPEN DATASET lv_fullpath_move FOR OUTPUT IN BINARY MODE.
+      IF sy-subrc = 0.
+        TRANSFER lv_xstring TO lv_fullpath_move.
+      ENDIF.
+      CLOSE DATASET lv_fullpath_move.
+
+      DELETE DATASET lv_fullpath.
+
+    ENDIF.
+  ENDLOOP.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  FILENAME_SPLIT
+*&---------------------------------------------------------------------*
+FORM filename_split  USING    ps_file_name_origin
+                     CHANGING ps_filename_split
+                              ps_sys_id_arxivar.
+
+  DATA: lt_split TYPE TABLE OF string,
+        ls_temp  TYPE string,
+        lv_lines TYPE i.
+
+  CLEAR: lt_split,
+         ls_temp,
+         lv_lines.
+
+  SPLIT ps_file_name_origin AT '_' INTO TABLE lt_split.
+  DESCRIBE TABLE lt_split LINES lv_lines.
+  IF lv_lines GE 3.
+    READ TABLE lt_split INDEX 1 INTO ps_sys_id_arxivar.
+    LOOP AT lt_split INTO ls_temp FROM 2 TO lv_lines.
+      CONCATENATE  ps_filename_split '_' ls_temp INTO ps_filename_split.
+    ENDLOOP.
+    SHIFT ps_filename_split LEFT DELETING LEADING '_'.
+  ENDIF.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  SUBMIT_OTX_TRIGGER
+*&---------------------------------------------------------------------*
+FORM submit_otx_trigger USING pt_archid_file TYPE ty_archid_file_t.
+
+  DATA:  ls_varid  TYPE          varid,
+         lt_varit  TYPE TABLE OF varit,
+         ls_varit  TYPE          varit,
+         lt_seltab TYPE TABLE OF rsparams,
+         ls_seltab LIKE LINE OF lt_seltab.
+
+  CLEAR: ls_varid,
+         lt_varit,
+         ls_varit,
+         lt_seltab,
+         ls_seltab.
+
+  LOOP AT pt_archid_file ASSIGNING FIELD-SYMBOL(<fs_archid>).
+    IF <fs_archid> IS ASSIGNED.
+      ls_seltab-selname = 'S_REGID'.
+      ls_seltab-kind    = 'S'.
+      ls_seltab-sign    = 'I'.
+      ls_seltab-option  = 'EQ'.
+      ls_seltab-low     = <fs_archid>-reg_id.
+      APPEND ls_seltab TO lt_seltab.
+    ENDIF.
+  ENDLOOP.
+
+  ls_seltab-selname = 'S_STAT'.
+  ls_seltab-kind    = 'S'.
+  ls_seltab-sign    = 'I'.
+  ls_seltab-option  = 'NE'.
+  ls_seltab-low     = '74'.
+  APPEND ls_seltab TO lt_seltab.
+
+  ls_varid-report  = '/OTX/PF01_P_IDF_TRIGGER'.
+  ls_varid-variant = sy-datum && sy-uzeit && sy-uname.
+  ls_varid-ename   = sy-uname.
+  ls_varid-edat    = sy-datlo.
+  ls_varit-langu   = sy-langu.
+  ls_varit-report  = ls_varid-report.
+  ls_varit-variant = ls_varid-variant.
+  ls_varit-vtext   = 'Generated Variant'.
+  APPEND ls_varit TO lt_varit.
+
+  CALL FUNCTION 'RS_CREATE_VARIANT'
+    EXPORTING
+      curr_report               = ls_varid-report
+      curr_variant              = ls_varid-variant
+      vari_desc                 = ls_varid
+    TABLES
+      vari_contents             = lt_seltab
+      vari_text                 = lt_varit
+    EXCEPTIONS
+      illegal_report_or_variant = 1
+      illegal_variantname       = 2
+      not_authorized            = 3
+      not_executed              = 4
+      report_not_existent       = 5
+      report_not_supplied       = 6
+      variant_exists            = 7
+      variant_locked            = 8
+      OTHERS                    = 9.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ENDIF.
+
+  SUBMIT /otx/pf01_p_idf_trigger
+    USING SELECTION-SET ls_varid-variant
+    AND RETURN.
+
+  COMMIT WORK AND WAIT.
+
+  SELECT *
+    FROM /opt/vim_1head
+    INTO TABLE @DATA(lt_1head)
+    FOR ALL ENTRIES IN @pt_archid_file
+    WHERE reg_id       = @pt_archid_file-reg_id
+      AND archive_date = @sy-datum.
+  IF sy-subrc = 0.
+    LOOP AT pt_archid_file ASSIGNING <fs_archid>.
+      IF <fs_archid> IS ASSIGNED.
+        READ TABLE lt_1head ASSIGNING FIELD-SYMBOL(<fs_1head>)
+          WITH KEY reg_id = <fs_archid>-reg_id.
+        IF sy-subrc = 0.
+          <fs_archid>-doc_id = <fs_1head>-docid.
+          UPDATE zvim_archid_file FROM <fs_archid>.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+  PERFORM write_results USING pt_archid_file.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  WRITE_RESULTS
+*&---------------------------------------------------------------------*
+FORM write_results USING pt_archid_file TYPE ty_archid_file_t.
+
+  DATA: lv_char50 TYPE char50.
+
+  LOOP AT pt_archid_file ASSIGNING FIELD-SYMBOL(<fs_archid>).
+    IF <fs_archid> IS ASSIGNED.
+      CLEAR: lv_char50.
+      lv_char50 = <fs_archid>-file_name_origin.
+      DATA(lv_wi_id) = <fs_archid>-wi_id.
+      SHIFT lv_wi_id LEFT DELETING LEADING '0'.
+      DATA(lv_reg) = <fs_archid>-reg_id.
+      SHIFT lv_reg LEFT DELETING LEADING '0'.
+      DATA(lv_doc) = <fs_archid>-doc_id.
+      SHIFT lv_doc LEFT DELETING LEADING '0'.
+      IF <fs_archid>-doc_id IS INITIAL.
+        WRITE: 'WI_ID: ' , lv_wi_id , 'REG_ID: ', lv_reg , 'FILE_NAME: ' , lv_char50. NEW-LINE.
+      ELSE.
+        WRITE: 'WI_ID: ' , lv_wi_id , 'REG_ID: ', lv_reg , 'DOC_ID:', lv_doc,  'FILE_NAME: ' , lv_char50. NEW-LINE.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+ENDFORM.
