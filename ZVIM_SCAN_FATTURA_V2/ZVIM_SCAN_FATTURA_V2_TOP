@@ -1,0 +1,7 @@
+*&---------------------------------------------------------------------*
+*&  Include           ZVIM_SCAN_FATTURA_V2_TOP
+*&---------------------------------------------------------------------*
+
+TABLES: toav0.
+
+TYPES: ty_archid_file_t TYPE TABLE OF zvim_archid_file.
