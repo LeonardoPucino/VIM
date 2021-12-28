@@ -1,0 +1,16 @@
+*&---------------------------------------------------------------------*
+*& Report  ZVIM_SCAN_FATTURA_V2
+*&
+*&---------------------------------------------------------------------*
+*&
+*&
+*&---------------------------------------------------------------------*
+REPORT ZVIM_SCAN_FATTURA_V2.
+
+INCLUDE ZVIM_SCAN_FATTURA_V2_TOP.
+INCLUDE ZVIM_SCAN_FATTURA_V2_SELECTION.
+INCLUDE ZVIM_SCAN_FATTURA_V2_F01.
+
+START-OF-SELECTION.
+
+PERFORM main.
