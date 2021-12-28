@@ -1,0 +1,181 @@
+FUNCTION ZRZL_READ_DIR.
+*"----------------------------------------------------------------------
+*"*"Interfaccia locale:
+*"  IMPORTING
+*"     VALUE(FROMLINE) DEFAULT 0
+*"     VALUE(NAME)
+*"     VALUE(NRLINES) DEFAULT 50
+*"     VALUE(SRVNAME) LIKE  SPFID-APSERVER DEFAULT SPACE
+*"  TABLES
+*"      FILE_TBL STRUCTURE  ZSALFLDIR
+*"----------------------------------------------------------------------
+
+DATA: LONGNAME LIKE SALFILE-LONGNAME.
+
+DATA: BEGIN OF LOC_FILE_TBL OCCURS 100.
+       INCLUDE STRUCTURE SALFLDIR.
+DATA: END OF LOC_FILE_TBL.
+
+DATA: MAX_NRLINES  TYPE I VALUE 90.
+
+DATA: LOC_FROMLINE TYPE I.
+DATA: LOC_NRLINES  TYPE I.
+DATA: TMP_NRLINES  TYPE I.
+DATA: SUBRC LIKE SY-SUBRC.
+DATA: I_NAME(200).
+
+DATA: BEGIN OF ID OCCURS 100.
+       INCLUDE STRUCTURE TPFID.
+DATA: END OF ID.
+
+DATA: BEGIN OF SYS_TABL OCCURS 100.
+       INCLUDE STRUCTURE MSXXLIST.
+DATA: END OF SYS_TABL.
+DATA: OPCODE TYPE X.
+
+************************************************************************
+*  perform global initialization
+************************************************************************
+  PERFORM INIT_GLOBAL.
+  REFRESH FILE_TBL.
+
+************************************************************************
+*  decide whether to read remote or local
+************************************************************************
+  IF SRVNAME = MY_NAME OR
+     SRVNAME = SPACE.
+
+************************************************************************
+*  read local
+************************************************************************
+    LONGNAME = NAME.
+
+    CALL FUNCTION 'ZRZL_READ_DIR_LOCAL'
+         EXPORTING NAME            = LONGNAME
+         TABLES    FILE_TBL        = FILE_TBL
+         EXCEPTIONS ARGUMENT_ERROR = 1
+                    NOT_FOUND      = 2
+                    NO_ADMIN_AUTHORITY = 8
+                    others         = 99.
+    SUBRC = SY-SUBRC.
+
+  ELSE.
+************************************************************************
+*  read remote
+************************************************************************
+
+   REFRESH SYS_TABL.
+   OPCODE = 1.
+   CALL 'ThSysInfo' ID 'OPCODE' FIELD OPCODE
+                    ID 'TAB'    FIELD SYS_TABL-*SYS*.
+
+   MOVE SPACE TO SYS_TABL.
+   READ TABLE SYS_TABL with key name = SRVNAME.
+   IF SY-SUBRC <> 0.
+************************************************************************
+*  read via operating system rexec
+************************************************************************
+
+*** get instance description *******************************************
+    SUBRC = 1.
+    SELECT * FROM TPFID WHERE APSERVER = SRVNAME.
+     ID = TPFID.
+     APPEND ID.
+    ENDSELECT.
+
+
+    LOOP AT ID.
+     IF NAME = SPACE OR NAME = '.'.
+      I_NAME = ID-HOMEDIR.
+     ELSE.
+      I_NAME = NAME.
+     ENDIF.
+
+     CALL FUNCTION 'RZL_READ_DIR_REMOTE_SH'
+          EXPORTING NAME            = I_NAME
+                    FROMLINE        = FROMLINE
+                    NRLINES         = NRLINES
+                    HOST            = ID-HOST
+                    USERNAME        = ID-USERNAME
+                    PASSWD          = ID-PASSWD
+                    OPSYS           = ID-OPSYS
+          TABLES    FILE_TBL        = FILE_TBL
+          EXCEPTIONS ARGUMENT_ERROR = 1
+                     NOT_FOUND      = 2
+                      NO_ADMIN_AUTHORITY = 8
+                      others          = 99.
+
+     SUBRC = SY-SUBRC.
+     EXIT.
+    ENDLOOP.
+
+   ELSE.
+
+************************************************************************
+*  read via remote appl.server
+************************************************************************
+    LOC_FROMLINE = FROMLINE.
+    LOC_NRLINES  = NRLINES.
+
+*** read up to 3 junks with each 90 lines ******************************
+    DO 10 TIMES.
+
+      REFRESH LOC_FILE_TBL.
+
+      IF LOC_NRLINES > MAX_NRLINES.
+        TMP_NRLINES = MAX_NRLINES.
+        LOC_NRLINES = LOC_NRLINES - MAX_NRLINES.
+      ELSE.
+        TMP_NRLINES = LOC_NRLINES.
+         LOC_NRLINES = 0.
+      ENDIF.
+
+      CALL FUNCTION 'RZL_READ_DIR_REMOTE'
+           EXPORTING  NAME           = NAME
+                      SRVNAME        = SRVNAME
+                      FROMLINE       = LOC_FROMLINE
+                      NRLINES        = TMP_NRLINES
+           TABLES     FILE_TBL       = LOC_FILE_TBL
+           EXCEPTIONS ARGUMENT_ERROR = 1
+                      NOT_FOUND      = 2
+                      SEND_ERROR     = 4
+                      NO_ADMIN_AUTHORITY = 8
+                      others          = 99.
+      IF SY-SUBRC <> 0.
+        SUBRC = SY-SUBRC.
+        EXIT..
+      ENDIF.
+
+      LOOP AT LOC_FILE_TBL.
+        FILE_TBL = LOC_FILE_TBL.
+        APPEND FILE_TBL.
+        TMP_NRLINES = TMP_NRLINES - 1.
+      ENDLOOP.
+
+      IF TMP_NRLINES > 0.
+        EXIT.
+      ENDIF.
+
+      IF LOC_NRLINES > 0.
+        LOC_FROMLINE = LOC_FROMLINE + MAX_NRLINES.
+      ELSE.
+        EXIT.
+      ENDIF.
+
+    ENDDO.
+   ENDIF.
+  ENDIF.
+
+************************************************************************
+*  exception processing
+************************************************************************
+  IF SUBRC <> 0.
+    CASE SUBRC.
+      WHEN 1.  RAISE ARGUMENT_ERROR.
+      WHEN 2.  RAISE NOT_FOUND.
+      WHEN 4.  RAISE SEND_ERROR.
+      WHEN OTHERS.  RAISE SYSTEM_FAILURE.
+    ENDCASE.
+  ENDIF.
+
+ENDFUNCTION.
