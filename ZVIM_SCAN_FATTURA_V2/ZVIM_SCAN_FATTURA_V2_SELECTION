@@ -1,0 +1,10 @@
+*&---------------------------------------------------------------------*
+*&  Include           ZVIM_SCAN_FATTURA_V2_SELECTION
+*&---------------------------------------------------------------------*
+
+PARAMETERS doctype TYPE toav0-ar_object DEFAULT '/OPT/FATRA'.
+PARAMETERS orgobj  TYPE swhactor        DEFAULT sy-uname.
+PARAMETERS sapobj  TYPE saeanwdid       NO-DISPLAY.
+PARAMETERS input   TYPE sdydo_value     DEFAULT 'XML document for Fattura'.
+SELECTION-SCREEN SKIP.
+PARAMETERS submit  AS CHECKBOX.
